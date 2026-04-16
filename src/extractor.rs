@@ -171,6 +171,21 @@ pub fn yt_dlp_args_for_download_to_file(
         "after_move:%(filepath)s".into(),
         "--no-playlist".into(),
         "--no-warnings".into(),
+        "--quiet".into(),
+        // YouTube 403 workaround: try multiple player clients in order. Since
+        // mid-2024 YouTube enforces "SABR streaming" with PO tokens on most
+        // web-derived formats; the URLs extracted look valid but return 403
+        // when fetched. `android_vr` and `tv` clients have much weaker gating
+        // as of early 2026. Keeping `default` first preserves the fast path
+        // for unprotected videos.
+        "--extractor-args".into(),
+        "youtube:player_client=default,web_safari,android_vr,tv".into(),
+        // Transient 403s and fragment drops are common on DASH streams —
+        // retry at the HTTP and fragment layer before giving up.
+        "--retries".into(),
+        "3".into(),
+        "--fragment-retries".into(),
+        "3".into(),
         "--".into(),
         url.into(),
     ]
