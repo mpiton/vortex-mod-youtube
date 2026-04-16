@@ -90,12 +90,15 @@ pub fn yt_dlp_args_for_stream_url(
 /// Both quality and format are optional; an empty string disables the
 /// respective constraint.
 ///
-/// The selector prefers muxed streams (`best[...]`) so that `--get-url`
-/// returns a single CDN URL in the common case. `bestvideo+bestaudio` (DASH)
-/// is placed as a fallback: YouTube no longer offers pre-muxed streams above
-/// ~480p, so the DASH arm is reached for 720p+ only when no muxed format
-/// matches the constraints. When the DASH fallback fires, yt-dlp prints two
-/// URLs; callers that cannot mux them must handle that case explicitly.
+/// The selector prefers `bestvideo+bestaudio` (DASH) over `best` (muxed-only)
+/// to preserve the requested quality. YouTube offers pre-muxed streams only up
+/// to ~480p; a `best[height<=720]` muxed selector would silently return 480p
+/// instead of the requested 720p. DASH streams at the correct height are
+/// therefore tried first, with muxed formats as a lower-quality fallback.
+///
+/// With `--get-url`, a DASH selection emits **two** CDN URLs (video then audio)
+/// on separate lines; a muxed selection emits **one**. Callers must handle
+/// both cases (see [`crate::resolve_stream_url`]).
 ///
 /// This is `pub` so that the format-selector logic can be unit-tested from
 /// a native build without touching the WASM host-function layer.
@@ -116,15 +119,15 @@ pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> S
     } else {
         match (height, has_format) {
             (Some(h), true) => format!(
-                "best[height<={h}][ext={format}]/bestvideo[height<={h}][ext={format}]+bestaudio/best[height<={h}]/best"
+                "bestvideo[height<={h}][ext={format}]+bestaudio/best[height<={h}][ext={format}]/best[height<={h}]/best"
             ),
             (Some(h), false) => format!(
-                "best[height<={h}]/bestvideo[height<={h}]+bestaudio/best"
+                "bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
             ),
             (None, true) => format!(
-                "best[ext={format}]/bestvideo[ext={format}]+bestaudio/best"
+                "bestvideo[ext={format}]+bestaudio/best[ext={format}]/best"
             ),
-            (None, false) => "best/bestvideo+bestaudio".into(),
+            (None, false) => "bestvideo+bestaudio/best".into(),
         }
     }
 }
@@ -267,7 +270,7 @@ mod tests {
     fn build_format_selector_video_with_height_and_format() {
         assert_eq!(
             build_format_selector("720p", "mp4", false),
-            "best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720]/best"
+            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
         );
     }
 
@@ -275,13 +278,13 @@ mod tests {
     fn build_format_selector_video_height_only() {
         assert_eq!(
             build_format_selector("1080", "", false),
-            "best[height<=1080]/bestvideo[height<=1080]+bestaudio/best"
+            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
         );
     }
 
     #[test]
     fn build_format_selector_video_unconstrained() {
-        assert_eq!(build_format_selector("", "", false), "best/bestvideo+bestaudio");
+        assert_eq!(build_format_selector("", "", false), "bestvideo+bestaudio/best");
     }
 
     #[test]
@@ -303,11 +306,11 @@ mod tests {
         // The function must treat them as if no format was specified.
         assert_eq!(
             build_format_selector("720p", "mp4/best", false),
-            "best[height<=720]/bestvideo[height<=720]+bestaudio/best"
+            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
         );
         assert_eq!(
             build_format_selector("", "ext=mp4]", false),
-            "best/bestvideo+bestaudio"
+            "bestvideo+bestaudio/best"
         );
     }
 
@@ -325,7 +328,7 @@ mod tests {
         let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
         assert_eq!(
             args[fmt_idx + 1],
-            "best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720]/best"
+            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
         );
     }
 
