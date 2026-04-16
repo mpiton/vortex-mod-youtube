@@ -90,6 +90,13 @@ pub fn yt_dlp_args_for_stream_url(
 /// Both quality and format are optional; an empty string disables the
 /// respective constraint.
 ///
+/// The selector prefers `bestvideo+bestaudio` (DASH streams) over `best`
+/// (muxed-only) so that 1080p+ resolutions — which YouTube rarely offers
+/// as pre-muxed files — are selected correctly. When used with `--get-url`
+/// and separate streams are chosen, yt-dlp prints two URLs (video then
+/// audio) on separate lines. Callers must handle both the one-URL (muxed)
+/// and two-URL (DASH) cases.
+///
 /// This is `pub` so that the format-selector logic can be unit-tested from
 /// a native build without touching the WASM host-function layer.
 pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> String {
@@ -104,10 +111,16 @@ pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> S
         }
     } else {
         match (height, has_format) {
-            (Some(h), true) => format!("best[height<={h}][ext={format}]/best[height<={h}]/best"),
-            (Some(h), false) => format!("best[height<={h}]/best"),
-            (None, true) => format!("best[ext={format}]/best"),
-            (None, false) => "best".into(),
+            (Some(h), true) => format!(
+                "bestvideo[height<={h}][ext={format}]+bestaudio/best[height<={h}][ext={format}]/best[height<={h}]/best"
+            ),
+            (Some(h), false) => format!(
+                "bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+            ),
+            (None, true) => format!(
+                "bestvideo[ext={format}]+bestaudio/best[ext={format}]/best"
+            ),
+            (None, false) => "bestvideo+bestaudio/best".into(),
         }
     }
 }
@@ -250,7 +263,7 @@ mod tests {
     fn build_format_selector_video_with_height_and_format() {
         assert_eq!(
             build_format_selector("720p", "mp4", false),
-            "best[height<=720][ext=mp4]/best[height<=720]/best"
+            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
         );
     }
 
@@ -258,13 +271,13 @@ mod tests {
     fn build_format_selector_video_height_only() {
         assert_eq!(
             build_format_selector("1080", "", false),
-            "best[height<=1080]/best"
+            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
         );
     }
 
     #[test]
     fn build_format_selector_video_unconstrained() {
-        assert_eq!(build_format_selector("", "", false), "best");
+        assert_eq!(build_format_selector("", "", false), "bestvideo+bestaudio/best");
     }
 
     #[test]
@@ -292,7 +305,10 @@ mod tests {
         assert!(args.contains(&"--no-playlist".into()));
         assert!(args.contains(&"--format".into()));
         let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
-        assert_eq!(args[fmt_idx + 1], "best[height<=720][ext=mp4]/best[height<=720]/best");
+        assert_eq!(
+            args[fmt_idx + 1],
+            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
+        );
     }
 
     #[test]
