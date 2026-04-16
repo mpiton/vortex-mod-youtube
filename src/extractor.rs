@@ -101,7 +101,11 @@ pub fn yt_dlp_args_for_stream_url(
 /// a native build without touching the WASM host-function layer.
 pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> String {
     let height: Option<u32> = quality.trim_end_matches('p').parse().ok();
-    let has_format = !format.is_empty();
+    // Reject non-alphanumeric format strings (e.g. containing `]`, `/`, `+`)
+    // that would produce an invalid yt-dlp selector. Fall back to no-format
+    // constraint rather than passing a malformed selector to yt-dlp.
+    let has_format =
+        !format.is_empty() && format.chars().all(|c| c.is_ascii_alphanumeric());
 
     if audio_only {
         if has_format {
@@ -291,6 +295,20 @@ mod tests {
     #[test]
     fn build_format_selector_audio_unconstrained() {
         assert_eq!(build_format_selector("720p", "", true), "bestaudio");
+    }
+
+    #[test]
+    fn build_format_selector_ignores_invalid_format_characters() {
+        // Characters like `]`, `/`, `+` would break the yt-dlp selector syntax.
+        // The function must treat them as if no format was specified.
+        assert_eq!(
+            build_format_selector("720p", "mp4/best", false),
+            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        );
+        assert_eq!(
+            build_format_selector("", "ext=mp4]", false),
+            "bestvideo+bestaudio/best"
+        );
     }
 
     #[test]

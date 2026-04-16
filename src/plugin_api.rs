@@ -110,9 +110,11 @@ pub fn extract_playlist(url: String) -> FnResult<String> {
 /// Returns the raw CDN URL string (not JSON) so that the host can pass it
 /// directly to the download engine without an extra parse step.
 ///
-/// yt-dlp's `--get-url` flag prints one URL per selected format; we return
-/// only the first non-empty line, which corresponds to the best match for the
-/// given format selector.
+/// yt-dlp's `--get-url` flag prints one URL per selected stream. When a DASH
+/// format (`bestvideo+bestaudio`) is chosen, two URLs are emitted — the host
+/// download engine cannot mux them, so we return [`PluginError::NoMatchingFormat`]
+/// in that case. The format selector's fallback chain (`/best[...]`) ensures a
+/// muxed single-URL stream is tried before erroring.
 #[plugin_fn]
 pub fn resolve_stream_url(input: String) -> FnResult<String> {
     #[derive(serde::Deserialize)]
@@ -138,11 +140,20 @@ pub fn resolve_stream_url(input: String) -> FnResult<String> {
         params.audio_only,
     ))?;
 
-    // yt-dlp --get-url may emit several lines (one per requested stream).
-    // Take the first non-empty one — it corresponds to the primary format.
-    let cdn_url = stdout
+    // Collect all non-empty lines. A DASH selection emits two URLs (video then
+    // audio); the host engine cannot mux them into a single stream, so we
+    // surface a clear error instead of silently returning a video-only URL.
+    let mut lines: Vec<&str> = stdout
         .lines()
-        .find(|l| !l.trim().is_empty())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+
+    if lines.len() > 1 {
+        return Err(error_to_fn_error(PluginError::NoMatchingFormat));
+    }
+
+    let cdn_url = lines
+        .pop()
         .ok_or_else(|| error_to_fn_error(PluginError::NoMatchingFormat))?
         .to_string();
 
