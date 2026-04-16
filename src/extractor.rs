@@ -57,6 +57,61 @@ pub fn yt_dlp_args_for_playlist(url: &str) -> Vec<String> {
     ]
 }
 
+/// Build the yt-dlp CLI arguments to resolve a direct CDN stream URL.
+///
+/// Uses `--get-url` which instructs yt-dlp to print the final CDN URL(s)
+/// instead of downloading. `--no-playlist` prevents accidental playlist
+/// expansion on mixed URLs.
+pub fn yt_dlp_args_for_stream_url(
+    url: &str,
+    quality: &str,
+    format: &str,
+    audio_only: bool,
+) -> Vec<String> {
+    let selector = build_format_selector(quality, format, audio_only);
+    vec![
+        "--get-url".into(),
+        "--no-playlist".into(),
+        "--no-warnings".into(),
+        "--no-call-home".into(),
+        "--format".into(),
+        selector,
+        "--".into(),
+        url.into(),
+    ]
+}
+
+/// Build a yt-dlp format selector string from quality / format preferences.
+///
+/// Quality strings are accepted as either a bare number (`"720"`) or with
+/// the trailing `p` suffix (`"720p"`). An empty or non-numeric quality
+/// string is treated as unconstrained ("best"). The `format` string is
+/// interpreted as a file extension constraint (e.g. `"mp4"`, `"webm"`).
+/// Both quality and format are optional; an empty string disables the
+/// respective constraint.
+///
+/// This is `pub` so that the format-selector logic can be unit-tested from
+/// a native build without touching the WASM host-function layer.
+pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> String {
+    let height: Option<u32> = quality.trim_end_matches('p').parse().ok();
+    let has_format = !format.is_empty();
+
+    if audio_only {
+        if has_format {
+            format!("bestaudio[ext={format}]/bestaudio")
+        } else {
+            "bestaudio".into()
+        }
+    } else {
+        match (height, has_format) {
+            (Some(h), true) => format!("best[height<={h}][ext={format}]/best[height<={h}]/best"),
+            (Some(h), false) => format!("best[height<={h}]/best"),
+            (None, true) => format!("best[ext={format}]/best"),
+            (None, false) => "best".into(),
+        }
+    }
+}
+
 /// Serialize a subprocess request as the JSON string expected by the host.
 ///
 /// Returns [`PluginError::SerdeJson`] in the (practically unreachable) case
@@ -189,6 +244,55 @@ mod tests {
             .position(|a| a == "https://youtu.be/abc")
             .expect("expected url");
         assert!(dash_idx < url_idx);
+    }
+
+    #[test]
+    fn build_format_selector_video_with_height_and_format() {
+        assert_eq!(
+            build_format_selector("720p", "mp4", false),
+            "best[height<=720][ext=mp4]/best[height<=720]/best"
+        );
+    }
+
+    #[test]
+    fn build_format_selector_video_height_only() {
+        assert_eq!(
+            build_format_selector("1080", "", false),
+            "best[height<=1080]/best"
+        );
+    }
+
+    #[test]
+    fn build_format_selector_video_unconstrained() {
+        assert_eq!(build_format_selector("", "", false), "best");
+    }
+
+    #[test]
+    fn build_format_selector_audio_with_format() {
+        assert_eq!(
+            build_format_selector("", "m4a", true),
+            "bestaudio[ext=m4a]/bestaudio"
+        );
+    }
+
+    #[test]
+    fn build_format_selector_audio_unconstrained() {
+        assert_eq!(build_format_selector("720p", "", true), "bestaudio");
+    }
+
+    #[test]
+    fn stream_url_args_include_get_url_flag() {
+        let args = yt_dlp_args_for_stream_url(
+            "https://youtu.be/abc12345678",
+            "720p",
+            "mp4",
+            false,
+        );
+        assert!(args.contains(&"--get-url".into()));
+        assert!(args.contains(&"--no-playlist".into()));
+        assert!(args.contains(&"--format".into()));
+        let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
+        assert_eq!(args[fmt_idx + 1], "best[height<=720][ext=mp4]/best[height<=720]/best");
     }
 
     #[test]

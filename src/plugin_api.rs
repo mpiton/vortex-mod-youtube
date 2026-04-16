@@ -10,7 +10,7 @@ use extism_pdk::*;
 use crate::error::PluginError;
 use crate::extractor::{
     build_subprocess_request, parse_subprocess_response, yt_dlp_args_for_playlist,
-    yt_dlp_args_for_single_video,
+    yt_dlp_args_for_single_video, yt_dlp_args_for_stream_url,
 };
 use crate::metadata::{parse_flat_playlist, parse_single_video};
 use crate::url_matcher::UrlKind;
@@ -101,6 +101,52 @@ pub fn extract_playlist(url: String) -> FnResult<String> {
     let playlist = parse_flat_playlist(&stdout).map_err(error_to_fn_error)?;
     let response = build_playlist_response(playlist);
     Ok(serde_json::to_string(&response)?)
+}
+
+/// Resolve the direct CDN stream URL for a single video with quality/format
+/// preferences.
+///
+/// Input is a JSON object `{ "url", "quality"?, "format"?, "audio_only"? }`.
+/// Returns the raw CDN URL string (not JSON) so that the host can pass it
+/// directly to the download engine without an extra parse step.
+///
+/// yt-dlp's `--get-url` flag prints one URL per selected format; we return
+/// only the first non-empty line, which corresponds to the best match for the
+/// given format selector.
+#[plugin_fn]
+pub fn resolve_stream_url(input: String) -> FnResult<String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        url: String,
+        #[serde(default)]
+        quality: String,
+        #[serde(default)]
+        format: String,
+        #[serde(default)]
+        audio_only: bool,
+    }
+
+    let params: Input =
+        serde_json::from_str(&input).map_err(|e| error_to_fn_error(PluginError::SerdeJson(e)))?;
+
+    ensure_single_video(&params.url).map_err(error_to_fn_error)?;
+
+    let stdout = call_yt_dlp(yt_dlp_args_for_stream_url(
+        &params.url,
+        &params.quality,
+        &params.format,
+        params.audio_only,
+    ))?;
+
+    // yt-dlp --get-url may emit several lines (one per requested stream).
+    // Take the first non-empty one — it corresponds to the primary format.
+    let cdn_url = stdout
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .ok_or_else(|| error_to_fn_error(PluginError::NoMatchingFormat))?
+        .to_string();
+
+    Ok(cdn_url)
 }
 
 // ── Host function wiring ──────────────────────────────────────────────────────
