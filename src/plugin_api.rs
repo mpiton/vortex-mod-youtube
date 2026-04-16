@@ -136,6 +136,15 @@ pub fn resolve_stream_url(input: String) -> FnResult<String> {
 
     ensure_single_video(&params.url).map_err(error_to_fn_error)?;
 
+    // YouTube only provides pre-merged HTTPS streams at ≤480p (itag 18/36).
+    // 720p and above are DASH-only and must go through download_to_file.
+    // Signal AdaptiveStreamOnly immediately rather than letting yt-dlp silently
+    // fall back to a lower-quality pre-merged stream.
+    let requested_height: Option<u32> = params.quality.trim_end_matches('p').parse().ok();
+    if requested_height.is_some_and(|h| h >= 720) {
+        return Err(error_to_fn_error(PluginError::AdaptiveStreamOnly));
+    }
+
     let stdout = call_yt_dlp(yt_dlp_args_for_stream_url(
         &params.url,
         &params.quality,

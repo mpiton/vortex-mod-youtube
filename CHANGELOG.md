@@ -3,6 +3,16 @@
 All notable changes to vortex-mod-youtube will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.2] - 2026-04-16
+
+### Fixed
+- `resolve_stream_url` was still returning a 360p stream for 1080p requests
+  because the format selector `best[height<=1080][protocol=https]` matched the
+  360p pre-merged stream (360 ≤ 1080). Root cause: YouTube only provides
+  pre-merged HTTPS streams at ≤480p. For 720p+ requests, `AdaptiveStreamOnly`
+  is now returned immediately without calling yt-dlp, correctly routing to the
+  `download_to_file` DASH+ffmpeg merge pipeline.
+
 ## [1.2.1] - 2026-04-16
 
 ### Fixed
