@@ -90,12 +90,12 @@ pub fn yt_dlp_args_for_stream_url(
 /// Both quality and format are optional; an empty string disables the
 /// respective constraint.
 ///
-/// The selector prefers `bestvideo+bestaudio` (DASH streams) over `best`
-/// (muxed-only) so that 1080p+ resolutions — which YouTube rarely offers
-/// as pre-muxed files — are selected correctly. When used with `--get-url`
-/// and separate streams are chosen, yt-dlp prints two URLs (video then
-/// audio) on separate lines. Callers must handle both the one-URL (muxed)
-/// and two-URL (DASH) cases.
+/// The selector prefers muxed streams (`best[...]`) so that `--get-url`
+/// returns a single CDN URL in the common case. `bestvideo+bestaudio` (DASH)
+/// is placed as a fallback: YouTube no longer offers pre-muxed streams above
+/// ~480p, so the DASH arm is reached for 720p+ only when no muxed format
+/// matches the constraints. When the DASH fallback fires, yt-dlp prints two
+/// URLs; callers that cannot mux them must handle that case explicitly.
 ///
 /// This is `pub` so that the format-selector logic can be unit-tested from
 /// a native build without touching the WASM host-function layer.
@@ -116,15 +116,15 @@ pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> S
     } else {
         match (height, has_format) {
             (Some(h), true) => format!(
-                "bestvideo[height<={h}][ext={format}]+bestaudio/best[height<={h}][ext={format}]/best[height<={h}]/best"
+                "best[height<={h}][ext={format}]/bestvideo[height<={h}][ext={format}]+bestaudio/best[height<={h}]/best"
             ),
             (Some(h), false) => format!(
-                "bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+                "best[height<={h}]/bestvideo[height<={h}]+bestaudio/best"
             ),
             (None, true) => format!(
-                "bestvideo[ext={format}]+bestaudio/best[ext={format}]/best"
+                "best[ext={format}]/bestvideo[ext={format}]+bestaudio/best"
             ),
-            (None, false) => "bestvideo+bestaudio/best".into(),
+            (None, false) => "best/bestvideo+bestaudio".into(),
         }
     }
 }
@@ -267,7 +267,7 @@ mod tests {
     fn build_format_selector_video_with_height_and_format() {
         assert_eq!(
             build_format_selector("720p", "mp4", false),
-            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
+            "best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720]/best"
         );
     }
 
@@ -275,13 +275,13 @@ mod tests {
     fn build_format_selector_video_height_only() {
         assert_eq!(
             build_format_selector("1080", "", false),
-            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+            "best[height<=1080]/bestvideo[height<=1080]+bestaudio/best"
         );
     }
 
     #[test]
     fn build_format_selector_video_unconstrained() {
-        assert_eq!(build_format_selector("", "", false), "bestvideo+bestaudio/best");
+        assert_eq!(build_format_selector("", "", false), "best/bestvideo+bestaudio");
     }
 
     #[test]
@@ -303,11 +303,11 @@ mod tests {
         // The function must treat them as if no format was specified.
         assert_eq!(
             build_format_selector("720p", "mp4/best", false),
-            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+            "best[height<=720]/bestvideo[height<=720]+bestaudio/best"
         );
         assert_eq!(
             build_format_selector("", "ext=mp4]", false),
-            "bestvideo+bestaudio/best"
+            "best/bestvideo+bestaudio"
         );
     }
 
@@ -325,7 +325,7 @@ mod tests {
         let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
         assert_eq!(
             args[fmt_idx + 1],
-            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
+            "best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720]/best"
         );
     }
 

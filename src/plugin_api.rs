@@ -110,11 +110,12 @@ pub fn extract_playlist(url: String) -> FnResult<String> {
 /// Returns the raw CDN URL string (not JSON) so that the host can pass it
 /// directly to the download engine without an extra parse step.
 ///
-/// yt-dlp's `--get-url` flag prints one URL per selected stream. When a DASH
-/// format (`bestvideo+bestaudio`) is chosen, two URLs are emitted — the host
-/// download engine cannot mux them, so we return [`PluginError::NoMatchingFormat`]
-/// in that case. The format selector's fallback chain (`/best[...]`) ensures a
-/// muxed single-URL stream is tried before erroring.
+/// yt-dlp's `--get-url` flag prints one URL per selected stream. The format
+/// selector prefers muxed streams (`best[...]`) first so a single URL is
+/// returned in the common case. `bestvideo+bestaudio` (DASH) is only reached
+/// when no muxed format matches the constraints; in that case two URLs are
+/// emitted and we return [`PluginError::NoMatchingFormat`] because the host
+/// download engine cannot mux separate streams.
 #[plugin_fn]
 pub fn resolve_stream_url(input: String) -> FnResult<String> {
     #[derive(serde::Deserialize)]
