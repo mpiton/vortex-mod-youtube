@@ -1,6 +1,6 @@
 [package]
 name = "vortex-mod-youtube"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "YouTube WASM plugin for Vortex — videos, playlists, shorts via yt-dlp"
 license = "GPL-3.0"

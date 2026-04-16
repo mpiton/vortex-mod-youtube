@@ -1,6 +1,6 @@
 [plugin]
 name = "vortex-mod-youtube"
-version = "1.2.0"
+version = "1.2.1"
 category = "crawler"
 author = "vortex-community"
 description = "YouTube video/playlist/shorts/channel downloader via yt-dlp"

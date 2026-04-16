@@ -120,17 +120,18 @@ pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> S
         }
     } else {
         // Video: require protocol=https to avoid HLS/DASH adaptive streams.
-        // Falls back to any direct-HTTPS stream when the exact quality/format
-        // is unavailable (e.g. 1080p requests fall back to 360p/480p direct).
+        //
+        // When a specific height is requested, do NOT include a height-unconstrained
+        // fallback. If yt-dlp emits no URL, the caller detects AdaptiveStreamOnly
+        // and delegates to `download_to_file` (DASH + ffmpeg merge).
+        //
+        // When no height is requested, fall back to any direct-HTTPS stream.
         match (height, has_format) {
             (Some(h), true) => format!(
                 "best[height<={h}][ext={format}][protocol=https]\
-                 /best[height<={h}][protocol=https]\
-                 /best[protocol=https]"
+                 /best[height<={h}][protocol=https]"
             ),
-            (Some(h), false) => format!(
-                "best[height<={h}][protocol=https]/best[protocol=https]"
-            ),
+            (Some(h), false) => format!("best[height<={h}][protocol=https]"),
             (None, true) => format!(
                 "best[ext={format}][protocol=https]/best[protocol=https]"
             ),
@@ -353,9 +354,11 @@ mod tests {
 
     #[test]
     fn build_format_selector_video_with_height_and_format() {
+        // No height-unconstrained fallback — if yt-dlp finds nothing, caller
+        // detects AdaptiveStreamOnly and delegates to download_to_file.
         assert_eq!(
             build_format_selector("720p", "mp4", false),
-            "best[height<=720][ext=mp4][protocol=https]/best[height<=720][protocol=https]/best[protocol=https]"
+            "best[height<=720][ext=mp4][protocol=https]/best[height<=720][protocol=https]"
         );
     }
 
@@ -363,7 +366,7 @@ mod tests {
     fn build_format_selector_video_height_only() {
         assert_eq!(
             build_format_selector("1080", "", false),
-            "best[height<=1080][protocol=https]/best[protocol=https]"
+            "best[height<=1080][protocol=https]"
         );
     }
 
@@ -394,7 +397,7 @@ mod tests {
         // The function must treat them as if no format was specified.
         assert_eq!(
             build_format_selector("720p", "mp4/best", false),
-            "best[height<=720][protocol=https]/best[protocol=https]"
+            "best[height<=720][protocol=https]"
         );
         assert_eq!(
             build_format_selector("", "ext=mp4]", false),
@@ -416,7 +419,7 @@ mod tests {
         let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
         assert_eq!(
             args[fmt_idx + 1],
-            "best[height<=720][ext=mp4][protocol=https]/best[height<=720][protocol=https]/best[protocol=https]"
+            "best[height<=720][ext=mp4][protocol=https]/best[height<=720][protocol=https]"
         );
     }
 

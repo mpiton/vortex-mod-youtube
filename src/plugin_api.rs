@@ -145,10 +145,20 @@ pub fn resolve_stream_url(input: String) -> FnResult<String> {
 
     // The direct-only selector should emit exactly one HTTPS URL. Take the
     // first non-empty line as a defensive measure against edge-case output.
+    //
+    // When a quality was explicitly requested and yt-dlp emits nothing, the
+    // requested resolution is only available as DASH streams — signal
+    // AdaptiveStreamOnly so Vortex core can delegate to download_to_file.
     let cdn_url = stdout
         .lines()
         .find(|l| !l.trim().is_empty())
-        .ok_or_else(|| error_to_fn_error(PluginError::NoMatchingFormat))?
+        .ok_or_else(|| {
+            if !params.quality.is_empty() {
+                error_to_fn_error(PluginError::AdaptiveStreamOnly)
+            } else {
+                error_to_fn_error(PluginError::NoMatchingFormat)
+            }
+        })?
         .to_string();
 
     // Safety net: reject HLS/DASH URLs that slipped through the format
