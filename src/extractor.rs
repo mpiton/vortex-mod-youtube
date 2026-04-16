@@ -57,6 +57,81 @@ pub fn yt_dlp_args_for_playlist(url: &str) -> Vec<String> {
     ]
 }
 
+/// Build the yt-dlp CLI arguments to resolve a direct CDN stream URL.
+///
+/// Uses `--get-url` which instructs yt-dlp to print the final CDN URL(s)
+/// instead of downloading. `--no-playlist` prevents accidental playlist
+/// expansion on mixed URLs.
+pub fn yt_dlp_args_for_stream_url(
+    url: &str,
+    quality: &str,
+    format: &str,
+    audio_only: bool,
+) -> Vec<String> {
+    let selector = build_format_selector(quality, format, audio_only);
+    vec![
+        "--get-url".into(),
+        "--no-playlist".into(),
+        "--no-warnings".into(),
+        "--no-call-home".into(),
+        "--format".into(),
+        selector,
+        "--".into(),
+        url.into(),
+    ]
+}
+
+/// Build a yt-dlp format selector string from quality / format preferences.
+///
+/// Quality strings are accepted as either a bare number (`"720"`) or with
+/// the trailing `p` suffix (`"720p"`). An empty or non-numeric quality
+/// string is treated as unconstrained ("best"). The `format` string is
+/// interpreted as a file extension constraint (e.g. `"mp4"`, `"webm"`).
+/// Both quality and format are optional; an empty string disables the
+/// respective constraint.
+///
+/// The selector prefers `bestvideo+bestaudio` (DASH) over `best` (muxed-only)
+/// to preserve the requested quality. YouTube offers pre-muxed streams only up
+/// to ~480p; a `best[height<=720]` muxed selector would silently return 480p
+/// instead of the requested 720p. DASH streams at the correct height are
+/// therefore tried first, with muxed formats as a lower-quality fallback.
+///
+/// With `--get-url`, a DASH selection emits **two** CDN URLs (video then audio)
+/// on separate lines; a muxed selection emits **one**. Callers must handle
+/// both cases (see [`crate::resolve_stream_url`]).
+///
+/// This is `pub` so that the format-selector logic can be unit-tested from
+/// a native build without touching the WASM host-function layer.
+pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> String {
+    let height: Option<u32> = quality.trim_end_matches('p').parse().ok();
+    // Reject non-alphanumeric format strings (e.g. containing `]`, `/`, `+`)
+    // that would produce an invalid yt-dlp selector. Fall back to no-format
+    // constraint rather than passing a malformed selector to yt-dlp.
+    let has_format =
+        !format.is_empty() && format.chars().all(|c| c.is_ascii_alphanumeric());
+
+    if audio_only {
+        if has_format {
+            format!("bestaudio[ext={format}]/bestaudio")
+        } else {
+            "bestaudio".into()
+        }
+    } else {
+        match (height, has_format) {
+            (Some(h), true) => format!(
+                "bestvideo[height<={h}][ext={format}]+bestaudio/best[height<={h}][ext={format}]/best[height<={h}]/best"
+            ),
+            (Some(h), false) => format!(
+                "bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+            ),
+            (None, true) => format!(
+                "bestvideo[ext={format}]+bestaudio/best[ext={format}]/best"
+            ),
+            (None, false) => "bestvideo+bestaudio/best".into(),
+        }
+    }
+}
+
 /// Serialize a subprocess request as the JSON string expected by the host.
 ///
 /// Returns [`PluginError::SerdeJson`] in the (practically unreachable) case
@@ -189,6 +264,72 @@ mod tests {
             .position(|a| a == "https://youtu.be/abc")
             .expect("expected url");
         assert!(dash_idx < url_idx);
+    }
+
+    #[test]
+    fn build_format_selector_video_with_height_and_format() {
+        assert_eq!(
+            build_format_selector("720p", "mp4", false),
+            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
+        );
+    }
+
+    #[test]
+    fn build_format_selector_video_height_only() {
+        assert_eq!(
+            build_format_selector("1080", "", false),
+            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+        );
+    }
+
+    #[test]
+    fn build_format_selector_video_unconstrained() {
+        assert_eq!(build_format_selector("", "", false), "bestvideo+bestaudio/best");
+    }
+
+    #[test]
+    fn build_format_selector_audio_with_format() {
+        assert_eq!(
+            build_format_selector("", "m4a", true),
+            "bestaudio[ext=m4a]/bestaudio"
+        );
+    }
+
+    #[test]
+    fn build_format_selector_audio_unconstrained() {
+        assert_eq!(build_format_selector("720p", "", true), "bestaudio");
+    }
+
+    #[test]
+    fn build_format_selector_ignores_invalid_format_characters() {
+        // Characters like `]`, `/`, `+` would break the yt-dlp selector syntax.
+        // The function must treat them as if no format was specified.
+        assert_eq!(
+            build_format_selector("720p", "mp4/best", false),
+            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        );
+        assert_eq!(
+            build_format_selector("", "ext=mp4]", false),
+            "bestvideo+bestaudio/best"
+        );
+    }
+
+    #[test]
+    fn stream_url_args_include_get_url_flag() {
+        let args = yt_dlp_args_for_stream_url(
+            "https://youtu.be/abc12345678",
+            "720p",
+            "mp4",
+            false,
+        );
+        assert!(args.contains(&"--get-url".into()));
+        assert!(args.contains(&"--no-playlist".into()));
+        assert!(args.contains(&"--format".into()));
+        let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
+        assert_eq!(
+            args[fmt_idx + 1],
+            "bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best"
+        );
     }
 
     #[test]

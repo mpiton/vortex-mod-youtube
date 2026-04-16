@@ -10,7 +10,7 @@ use extism_pdk::*;
 use crate::error::PluginError;
 use crate::extractor::{
     build_subprocess_request, parse_subprocess_response, yt_dlp_args_for_playlist,
-    yt_dlp_args_for_single_video,
+    yt_dlp_args_for_single_video, yt_dlp_args_for_stream_url,
 };
 use crate::metadata::{parse_flat_playlist, parse_single_video};
 use crate::url_matcher::UrlKind;
@@ -101,6 +101,59 @@ pub fn extract_playlist(url: String) -> FnResult<String> {
     let playlist = parse_flat_playlist(&stdout).map_err(error_to_fn_error)?;
     let response = build_playlist_response(playlist);
     Ok(serde_json::to_string(&response)?)
+}
+
+/// Resolve the direct CDN stream URL(s) for a single video with quality/format
+/// preferences.
+///
+/// Input is a JSON object `{ "url", "quality"?, "format"?, "audio_only"? }`.
+/// Returns a **newline-separated list of CDN URLs**:
+/// - **One URL** — muxed stream (video + audio combined, typically ≤480p on YouTube).
+/// - **Two URLs** — DASH streams: line 1 is the video URL, line 2 is the audio URL.
+///   This is the normal path for 720p+ because YouTube no longer offers pre-muxed
+///   streams at those resolutions. Callers must mux or handle both URLs.
+///
+/// Returns [`PluginError::NoMatchingFormat`] only when yt-dlp emits no URLs at all.
+#[plugin_fn]
+pub fn resolve_stream_url(input: String) -> FnResult<String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        url: String,
+        #[serde(default)]
+        quality: String,
+        #[serde(default)]
+        format: String,
+        #[serde(default)]
+        audio_only: bool,
+    }
+
+    let params: Input =
+        serde_json::from_str(&input).map_err(|e| error_to_fn_error(PluginError::SerdeJson(e)))?;
+
+    ensure_single_video(&params.url).map_err(error_to_fn_error)?;
+
+    let stdout = call_yt_dlp(yt_dlp_args_for_stream_url(
+        &params.url,
+        &params.quality,
+        &params.format,
+        params.audio_only,
+    ))?;
+
+    // Collect all non-empty lines. A muxed selection emits one URL; a DASH
+    // selection (bestvideo+bestaudio) emits two — video on line 1, audio on
+    // line 2. Return all of them so the caller can handle both cases rather
+    // than silently discarding the audio URL or erroring on valid 720p+ content.
+    let cdn_urls: String = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if cdn_urls.is_empty() {
+        return Err(error_to_fn_error(PluginError::NoMatchingFormat));
+    }
+
+    Ok(cdn_urls)
 }
 
 // ── Host function wiring ──────────────────────────────────────────────────────
