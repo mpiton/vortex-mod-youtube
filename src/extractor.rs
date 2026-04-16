@@ -39,7 +39,6 @@ pub fn yt_dlp_args_for_single_video(url: &str) -> Vec<String> {
         "--dump-json".into(),
         "--no-playlist".into(),
         "--no-warnings".into(),
-        "--no-call-home".into(),
         "--".into(),
         url.into(),
     ]
@@ -51,7 +50,6 @@ pub fn yt_dlp_args_for_playlist(url: &str) -> Vec<String> {
         "--dump-json".into(),
         "--flat-playlist".into(),
         "--no-warnings".into(),
-        "--no-call-home".into(),
         "--".into(),
         url.into(),
     ]
@@ -73,7 +71,6 @@ pub fn yt_dlp_args_for_stream_url(
         "--get-url".into(),
         "--no-playlist".into(),
         "--no-warnings".into(),
-        "--no-call-home".into(),
         "--format".into(),
         selector,
         "--".into(),
