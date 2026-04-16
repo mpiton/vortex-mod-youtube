@@ -32,4 +32,9 @@ pub enum PluginError {
     /// No format matched the user's quality preference.
     #[error("no format matches requested quality")]
     NoMatchingFormat,
+
+    /// yt-dlp returned an HLS or DASH stream URL which the Vortex download
+    /// engine cannot process directly.
+    #[error("video is only available as an adaptive stream (HLS/DASH) at this quality; try 360p or 480p for a direct download")]
+    AdaptiveStreamOnly,
 }

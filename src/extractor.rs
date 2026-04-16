@@ -27,6 +27,9 @@ pub struct SubprocessResponse {
 /// Default subprocess timeout — 60 seconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 
+/// Default timeout for full video download+merge — 30 minutes.
+pub const DEFAULT_DOWNLOAD_TIMEOUT_MS: u64 = 1_800_000;
+
 /// Build the yt-dlp CLI arguments for a single video.
 ///
 /// Uses `--dump-json` with `--no-playlist` to avoid accidentally expanding
@@ -87,14 +90,16 @@ pub fn yt_dlp_args_for_stream_url(
 /// Both quality and format are optional; an empty string disables the
 /// respective constraint.
 ///
-/// **Muxed-only**: uses the `best` yt-dlp format family, which selects a
-/// pre-merged video+audio stream. This emits **one** CDN URL from
-/// `--get-url`, which the Vortex download engine can fetch directly.
+/// **Direct-download only**: uses the `best[protocol=https]` yt-dlp format
+/// family, which selects a pre-merged video+audio stream delivered as a
+/// single HTTP(S) URL. This emits exactly **one** CDN URL from `--get-url`
+/// that the Vortex download engine can fetch directly.
 ///
-/// DASH formats (`bestvideo+bestaudio`) emit **two** URLs and require
-/// ffmpeg for muxing — not yet supported by the Vortex core engine.
-/// When the user requests a height where YouTube only offers DASH (>480p),
-/// yt-dlp automatically falls back to the best available pre-muxed stream.
+/// HLS (`m3u8_native`) and DASH (`http_dash_segments`) formats are excluded
+/// because the Vortex download engine cannot process adaptive streams.
+/// YouTube typically provides direct HTTPS streams at 480p or lower (itag 18
+/// for 360p, itag 22 for 720p on older videos). For videos where no direct
+/// stream is available, yt-dlp emits empty output → `NoMatchingFormat` error.
 ///
 /// This is `pub` so that the format-selector logic can be unit-tested from
 /// a native build without touching the WASM host-function layer.
@@ -107,19 +112,109 @@ pub fn build_format_selector(quality: &str, format: &str, audio_only: bool) -> S
         !format.is_empty() && format.chars().all(|c| c.is_ascii_alphanumeric());
 
     if audio_only {
+        // Audio-only: bestaudio is typically an HTTPS stream (m4a/opus/webm).
+        if has_format {
+            format!("bestaudio[ext={format}][protocol=https]/bestaudio[protocol=https]/bestaudio[ext={format}]/bestaudio")
+        } else {
+            "bestaudio[protocol=https]/bestaudio".into()
+        }
+    } else {
+        // Video: require protocol=https to avoid HLS/DASH adaptive streams.
+        // Falls back to any direct-HTTPS stream when the exact quality/format
+        // is unavailable (e.g. 1080p requests fall back to 360p/480p direct).
+        match (height, has_format) {
+            (Some(h), true) => format!(
+                "best[height<={h}][ext={format}][protocol=https]\
+                 /best[height<={h}][protocol=https]\
+                 /best[protocol=https]"
+            ),
+            (Some(h), false) => format!(
+                "best[height<={h}][protocol=https]/best[protocol=https]"
+            ),
+            (None, true) => format!(
+                "best[ext={format}][protocol=https]/best[protocol=https]"
+            ),
+            (None, false) => "best[protocol=https]".into(),
+        }
+    }
+}
+
+/// Build yt-dlp args for a full download+merge operation.
+///
+/// Unlike `yt_dlp_args_for_stream_url`, this actually downloads the video
+/// and audio streams, merges them via ffmpeg (spawned internally by yt-dlp),
+/// and writes the final file to `output_dir`. The merged file path is printed
+/// to stdout via `--print after_move:%(filepath)s` for the caller to read.
+///
+/// The format selector prefers DASH streams (bestvideo+bestaudio) which allow
+/// 1080p and above, unlike the `best[protocol=https]` selector used by
+/// `yt_dlp_args_for_stream_url` which is limited to pre-merged ≤720p streams.
+pub fn yt_dlp_args_for_download_to_file(
+    url: &str,
+    quality: &str,
+    format: &str,
+    output_dir: &str,
+    audio_only: bool,
+) -> Vec<String> {
+    let selector = build_download_format_selector(quality, format, audio_only);
+    let output_template = format!("{output_dir}/%(id)s.%(ext)s");
+
+    vec![
+        "--format".into(),
+        selector,
+        "--merge-output-format".into(),
+        format.into(),
+        "--output".into(),
+        output_template,
+        "--print".into(),
+        "after_move:%(filepath)s".into(),
+        "--no-playlist".into(),
+        "--no-warnings".into(),
+        "--".into(),
+        url.into(),
+    ]
+}
+
+/// Build a yt-dlp format selector for DASH download+merge.
+///
+/// For video: prefers `bestvideo[height<=H]+bestaudio`, which selects
+/// the best DASH video/audio streams up to the requested height and lets
+/// yt-dlp merge them via ffmpeg. Falls back to `best[height<=H]`.
+///
+/// For audio-only: uses `bestaudio[ext=FORMAT]/bestaudio`.
+fn build_download_format_selector(quality: &str, format: &str, audio_only: bool) -> String {
+    let height: Option<u32> = quality.trim_end_matches('p').parse().ok();
+    let has_format = !format.is_empty() && format.chars().all(|c| c.is_ascii_alphanumeric());
+
+    if audio_only {
         if has_format {
             format!("bestaudio[ext={format}]/bestaudio")
         } else {
             "bestaudio".into()
         }
     } else {
-        match (height, has_format) {
-            (Some(h), true) => format!("best[height<={h}][ext={format}]/best[height<={h}]/best"),
-            (Some(h), false) => format!("best[height<={h}]/best"),
-            (None, true) => format!("best[ext={format}]/best"),
-            (None, false) => "best".into(),
+        match height {
+            Some(h) => format!(
+                "bestvideo[height<={h}]+bestaudio/bestvideo[height<={h}]+bestaudio[ext=m4a]/best[height<={h}]"
+            ),
+            None => "bestvideo+bestaudio/best".into(),
         }
     }
+}
+
+/// Parse the final merged file path from yt-dlp stdout.
+///
+/// With `--print after_move:%(filepath)s`, yt-dlp appends one line to stdout
+/// containing the absolute path of the merged output file. Takes the last
+/// non-empty line to be robust against any incidental output.
+pub fn parse_download_path_from_stdout(stdout: &str) -> Result<String, PluginError> {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+        .ok_or(PluginError::NoMatchingFormat)
 }
 
 /// Serialize a subprocess request as the JSON string expected by the host.
@@ -260,7 +355,7 @@ mod tests {
     fn build_format_selector_video_with_height_and_format() {
         assert_eq!(
             build_format_selector("720p", "mp4", false),
-            "best[height<=720][ext=mp4]/best[height<=720]/best"
+            "best[height<=720][ext=mp4][protocol=https]/best[height<=720][protocol=https]/best[protocol=https]"
         );
     }
 
@@ -268,26 +363,29 @@ mod tests {
     fn build_format_selector_video_height_only() {
         assert_eq!(
             build_format_selector("1080", "", false),
-            "best[height<=1080]/best"
+            "best[height<=1080][protocol=https]/best[protocol=https]"
         );
     }
 
     #[test]
     fn build_format_selector_video_unconstrained() {
-        assert_eq!(build_format_selector("", "", false), "best");
+        assert_eq!(build_format_selector("", "", false), "best[protocol=https]");
     }
 
     #[test]
     fn build_format_selector_audio_with_format() {
         assert_eq!(
             build_format_selector("", "m4a", true),
-            "bestaudio[ext=m4a]/bestaudio"
+            "bestaudio[ext=m4a][protocol=https]/bestaudio[protocol=https]/bestaudio[ext=m4a]/bestaudio"
         );
     }
 
     #[test]
     fn build_format_selector_audio_unconstrained() {
-        assert_eq!(build_format_selector("720p", "", true), "bestaudio");
+        assert_eq!(
+            build_format_selector("720p", "", true),
+            "bestaudio[protocol=https]/bestaudio"
+        );
     }
 
     #[test]
@@ -296,11 +394,11 @@ mod tests {
         // The function must treat them as if no format was specified.
         assert_eq!(
             build_format_selector("720p", "mp4/best", false),
-            "best[height<=720]/best"
+            "best[height<=720][protocol=https]/best[protocol=https]"
         );
         assert_eq!(
             build_format_selector("", "ext=mp4]", false),
-            "best"
+            "best[protocol=https]"
         );
     }
 
@@ -318,7 +416,7 @@ mod tests {
         let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
         assert_eq!(
             args[fmt_idx + 1],
-            "best[height<=720][ext=mp4]/best[height<=720]/best"
+            "best[height<=720][ext=mp4][protocol=https]/best[height<=720][protocol=https]/best[protocol=https]"
         );
     }
 
@@ -334,5 +432,55 @@ mod tests {
             }
             _ => panic!("expected Subprocess error"),
         }
+    }
+
+    #[test]
+    fn download_args_include_bestvideo_plus_bestaudio() {
+        let args = yt_dlp_args_for_download_to_file("https://youtu.be/abc", "1080p", "mp4", "/tmp/vx", false);
+        let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
+        assert!(args[fmt_idx + 1].contains("bestvideo"), "selector must start with bestvideo");
+        assert!(args[fmt_idx + 1].contains("bestaudio"), "selector must include bestaudio");
+    }
+
+    #[test]
+    fn download_args_audio_only_uses_bestaudio() {
+        let args = yt_dlp_args_for_download_to_file("https://youtu.be/abc", "", "m4a", "/tmp/vx", true);
+        let fmt_idx = args.iter().position(|a| a == "--format").unwrap();
+        assert!(args[fmt_idx + 1].starts_with("bestaudio"), "audio_only must start with bestaudio");
+    }
+
+    #[test]
+    fn download_args_include_merge_output_format() {
+        let args = yt_dlp_args_for_download_to_file("https://youtu.be/abc", "1080p", "mp4", "/tmp/vx", false);
+        assert!(args.contains(&"--merge-output-format".into()));
+        let idx = args.iter().position(|a| a == "--merge-output-format").unwrap();
+        assert_eq!(args[idx + 1], "mp4");
+    }
+
+    #[test]
+    fn download_args_include_output_template_with_dir() {
+        let args = yt_dlp_args_for_download_to_file("https://youtu.be/abc", "720p", "mp4", "/tmp/vx", false);
+        let out_idx = args.iter().position(|a| a == "--output").unwrap();
+        assert!(args[out_idx + 1].starts_with("/tmp/vx/"), "output template must be in output_dir");
+    }
+
+    #[test]
+    fn download_args_include_print_after_move() {
+        let args = yt_dlp_args_for_download_to_file("https://youtu.be/abc", "1080p", "mp4", "/tmp/vx", false);
+        let idx = args.iter().position(|a| a == "--print").unwrap();
+        assert_eq!(args[idx + 1], "after_move:%(filepath)s");
+    }
+
+    #[test]
+    fn parse_download_path_returns_last_nonempty_line() {
+        let stdout = "\n/tmp/vx/dQw4w9WgXcQ.mp4\n";
+        let path = parse_download_path_from_stdout(stdout).unwrap();
+        assert_eq!(path, "/tmp/vx/dQw4w9WgXcQ.mp4");
+    }
+
+    #[test]
+    fn parse_download_path_empty_stdout_returns_error() {
+        let result = parse_download_path_from_stdout("   \n  \n");
+        assert!(matches!(result, Err(PluginError::NoMatchingFormat)));
     }
 }

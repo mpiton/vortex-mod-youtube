@@ -9,8 +9,9 @@ use extism_pdk::*;
 
 use crate::error::PluginError;
 use crate::extractor::{
-    build_subprocess_request, parse_subprocess_response, yt_dlp_args_for_playlist,
-    yt_dlp_args_for_single_video, yt_dlp_args_for_stream_url,
+    build_subprocess_request, parse_download_path_from_stdout, parse_subprocess_response,
+    yt_dlp_args_for_download_to_file, yt_dlp_args_for_playlist, yt_dlp_args_for_single_video,
+    yt_dlp_args_for_stream_url, DEFAULT_DOWNLOAD_TIMEOUT_MS,
 };
 use crate::metadata::{parse_flat_playlist, parse_single_video};
 use crate::url_matcher::UrlKind;
@@ -109,13 +110,14 @@ pub fn extract_playlist(url: String) -> FnResult<String> {
 /// Input is a JSON object `{ "url", "quality"?, "format"?, "audio_only"? }`.
 /// Returns the first non-empty CDN URL emitted by yt-dlp `--get-url`.
 ///
-/// The format selector uses the `best` family (muxed video+audio streams) so
-/// yt-dlp emits exactly **one** URL. DASH formats (`bestvideo+bestaudio`)
-/// emit two URLs and require ffmpeg for muxing — not yet supported by the
-/// Vortex download engine. When YouTube only has DASH at the requested height
-/// (>480p), yt-dlp falls back to the best available pre-muxed stream.
+/// The format selector uses `best[protocol=https]` to guarantee a single
+/// direct HTTPS URL that the Vortex download engine can fetch without any
+/// adaptive-streaming logic. HLS (`m3u8_native`) and DASH (`http_dash_segments`)
+/// formats are excluded. YouTube typically provides direct streams at ≤480p;
+/// higher resolutions may not find a matching format.
 ///
-/// Returns [`PluginError::NoMatchingFormat`] when yt-dlp emits no URLs at all.
+/// Returns [`PluginError::NoMatchingFormat`] when yt-dlp emits no URLs at all,
+/// and [`PluginError::AdaptiveStreamOnly`] if an HLS URL slips through.
 #[plugin_fn]
 pub fn resolve_stream_url(input: String) -> FnResult<String> {
     #[derive(serde::Deserialize)]
@@ -141,15 +143,73 @@ pub fn resolve_stream_url(input: String) -> FnResult<String> {
         params.audio_only,
     ))?;
 
-    // The muxed-only selector always emits one URL. Take the first non-empty
-    // line as a defensive measure against any yt-dlp edge-case output.
+    // The direct-only selector should emit exactly one HTTPS URL. Take the
+    // first non-empty line as a defensive measure against edge-case output.
     let cdn_url = stdout
         .lines()
         .find(|l| !l.trim().is_empty())
         .ok_or_else(|| error_to_fn_error(PluginError::NoMatchingFormat))?
         .to_string();
 
+    // Safety net: reject HLS/DASH URLs that slipped through the format
+    // selector. The Vortex download engine requires a single direct HTTPS URL.
+    if cdn_url.contains(".m3u8") || cdn_url.contains("manifest.googlevideo.com") {
+        return Err(error_to_fn_error(PluginError::AdaptiveStreamOnly));
+    }
+
     Ok(cdn_url)
+}
+
+/// Download a video/audio file using yt-dlp's native download+merge pipeline.
+///
+/// Use this when `resolve_stream_url` returns `AdaptiveStreamOnly` — i.e. when
+/// the requested quality is only available as DASH streams that must be merged
+/// with ffmpeg. yt-dlp handles the multi-stream download and ffmpeg merge
+/// internally; the merged file is written to `output_dir` and its path is
+/// returned as a raw string.
+///
+/// Input:  JSON `{ "url", "quality"?, "format"?, "output_dir", "audio_only"? }`
+/// Output: absolute path of the merged file (raw string)
+#[plugin_fn]
+pub fn download_to_file(input: String) -> FnResult<String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        url: String,
+        #[serde(default)]
+        quality: String,
+        #[serde(default)]
+        format: String,
+        output_dir: String,
+        #[serde(default)]
+        audio_only: bool,
+    }
+
+    let params: Input =
+        serde_json::from_str(&input).map_err(|e| error_to_fn_error(PluginError::SerdeJson(e)))?;
+
+    ensure_single_video(&params.url).map_err(error_to_fn_error)?;
+
+    let args = yt_dlp_args_for_download_to_file(
+        &params.url,
+        &params.quality,
+        &params.format,
+        &params.output_dir,
+        params.audio_only,
+    );
+
+    // Override timeout: full download+merge can take 30+ minutes.
+    let req = crate::extractor::SubprocessRequest {
+        binary: "yt-dlp".into(),
+        args,
+        timeout_ms: DEFAULT_DOWNLOAD_TIMEOUT_MS,
+    };
+    let req_json = serde_json::to_string(&req)
+        .map_err(|e| error_to_fn_error(PluginError::SerdeJson(e)))?;
+
+    let resp_json = unsafe { run_subprocess(req_json)? };
+    let stdout = parse_subprocess_response(&resp_json).map_err(error_to_fn_error)?;
+
+    parse_download_path_from_stdout(&stdout).map_err(error_to_fn_error)
 }
 
 // ── Host function wiring ──────────────────────────────────────────────────────
