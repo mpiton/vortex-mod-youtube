@@ -103,17 +103,19 @@ pub fn extract_playlist(url: String) -> FnResult<String> {
     Ok(serde_json::to_string(&response)?)
 }
 
-/// Resolve the direct CDN stream URL(s) for a single video with quality/format
+/// Resolve the direct CDN stream URL for a single video with quality/format
 /// preferences.
 ///
 /// Input is a JSON object `{ "url", "quality"?, "format"?, "audio_only"? }`.
-/// Returns a **newline-separated list of CDN URLs**:
-/// - **One URL** — muxed stream (video + audio combined, typically ≤480p on YouTube).
-/// - **Two URLs** — DASH streams: line 1 is the video URL, line 2 is the audio URL.
-///   This is the normal path for 720p+ because YouTube no longer offers pre-muxed
-///   streams at those resolutions. Callers must mux or handle both URLs.
+/// Returns the first non-empty CDN URL emitted by yt-dlp `--get-url`.
 ///
-/// Returns [`PluginError::NoMatchingFormat`] only when yt-dlp emits no URLs at all.
+/// The format selector uses the `best` family (muxed video+audio streams) so
+/// yt-dlp emits exactly **one** URL. DASH formats (`bestvideo+bestaudio`)
+/// emit two URLs and require ffmpeg for muxing — not yet supported by the
+/// Vortex download engine. When YouTube only has DASH at the requested height
+/// (>480p), yt-dlp falls back to the best available pre-muxed stream.
+///
+/// Returns [`PluginError::NoMatchingFormat`] when yt-dlp emits no URLs at all.
 #[plugin_fn]
 pub fn resolve_stream_url(input: String) -> FnResult<String> {
     #[derive(serde::Deserialize)]
@@ -139,21 +141,15 @@ pub fn resolve_stream_url(input: String) -> FnResult<String> {
         params.audio_only,
     ))?;
 
-    // Collect all non-empty lines. A muxed selection emits one URL; a DASH
-    // selection (bestvideo+bestaudio) emits two — video on line 1, audio on
-    // line 2. Return all of them so the caller can handle both cases rather
-    // than silently discarding the audio URL or erroring on valid 720p+ content.
-    let cdn_urls: String = stdout
+    // The muxed-only selector always emits one URL. Take the first non-empty
+    // line as a defensive measure against any yt-dlp edge-case output.
+    let cdn_url = stdout
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+        .find(|l| !l.trim().is_empty())
+        .ok_or_else(|| error_to_fn_error(PluginError::NoMatchingFormat))?
+        .to_string();
 
-    if cdn_urls.is_empty() {
-        return Err(error_to_fn_error(PluginError::NoMatchingFormat));
-    }
-
-    Ok(cdn_urls)
+    Ok(cdn_url)
 }
 
 // ── Host function wiring ──────────────────────────────────────────────────────
