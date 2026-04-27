@@ -3,6 +3,12 @@
 All notable changes to vortex-mod-youtube will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.4] - 2026-04-27
+
+### Added
+- `repository` field in `plugin.toml` so the host's "Report broken plugin"
+  feature can build a pre-filled GitHub issue URL. Fixes vortex#115.
+
 ## [1.2.3] - 2026-04-16
 
 ### Fixed
