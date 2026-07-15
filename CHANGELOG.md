@@ -3,6 +3,14 @@
 All notable changes to vortex-mod-youtube will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] - 2026-07-15
+
+### Security
+- Replaced the generic `run_subprocess` import with Vortex 0.2's typed
+  `run_ytdlp` broker. The plugin now sends only an action, URL, media
+  preferences, and an output directory; the trusted host owns the binary,
+  command-line arguments, timeout, environment, and working directory.
+
 ## [1.2.3] - 2026-04-16
 
 ### Fixed

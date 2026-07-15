@@ -13,8 +13,9 @@ YouTube WASM plugin for [Vortex](https://github.com/mpiton/vortex).
 
 ## Requirements
 
-- `yt-dlp` installed and available on `PATH` (host-side).
-- Vortex plugin host ≥ 0.1.0.
+- `yt-dlp` installed in a host-approved location such as `~/.local/bin`,
+  `/usr/local/bin`, or `/usr/bin`.
+- Vortex plugin host ≥ 0.2.0 (typed `run_ytdlp` broker).
 
 ## Build
 
@@ -41,16 +42,16 @@ instructions below rename it to match the directory purely as a convention;
 you may leave the underscore form if you prefer.
 
 ```bash
-mkdir -p ~/.config/vortex/plugins/vortex-mod-youtube
-cp plugin.toml ~/.config/vortex/plugins/vortex-mod-youtube/
+mkdir -p ~/.local/share/dev.vortex.app/plugins/vortex-mod-youtube
+cp plugin.toml ~/.local/share/dev.vortex.app/plugins/vortex-mod-youtube/
 cp target/wasm32-wasip1/release/vortex_mod_youtube.wasm \
-   ~/.config/vortex/plugins/vortex-mod-youtube/vortex-mod-youtube.wasm
+   ~/.local/share/dev.vortex.app/plugins/vortex-mod-youtube/vortex-mod-youtube.wasm
 ```
 
 Final layout:
 
 ```text
-~/.config/vortex/plugins/vortex-mod-youtube/
+~/.local/share/dev.vortex.app/plugins/vortex-mod-youtube/
   ├── plugin.toml
   └── vortex-mod-youtube.wasm
 ```

@@ -223,9 +223,7 @@ fn is_valid_video_id(id: &str) -> bool {
 
 fn watch_id_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)^/watch\?(?:[^&#]*&)*v=([A-Za-z0-9_-]{6,})").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?i)^/watch\?(?:[^&#]*&)*v=([A-Za-z0-9_-]{6,})").unwrap())
 }
 
 fn shorts_id_regex() -> &'static Regex {
@@ -235,9 +233,7 @@ fn shorts_id_regex() -> &'static Regex {
 
 fn playlist_id_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)^/playlist\?(?:[^&#]*&)*list=([A-Za-z0-9_-]+)").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?i)^/playlist\?(?:[^&#]*&)*list=([A-Za-z0-9_-]+)").unwrap())
 }
 
 fn channel_path_regex() -> &'static Regex {
