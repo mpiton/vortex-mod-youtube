@@ -1,11 +1,11 @@
 [plugin]
 name = "vortex-mod-youtube"
-version = "1.2.3"
+version = "1.3.0"
 category = "crawler"
 author = "vortex-community"
 description = "YouTube video/playlist/shorts/channel downloader via yt-dlp"
 license = "GPL-3.0"
-min_vortex_version = "0.1.0"
+min_vortex_version = "0.2.0"
 
 [capabilities]
 # Least privilege — all network access is delegated to yt-dlp, so the

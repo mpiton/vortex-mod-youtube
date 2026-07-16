@@ -9,9 +9,8 @@ use extism_pdk::*;
 
 use crate::error::PluginError;
 use crate::extractor::{
-    build_subprocess_request, parse_download_path_from_stdout, parse_subprocess_response,
-    yt_dlp_args_for_download_to_file, yt_dlp_args_for_playlist, yt_dlp_args_for_single_video,
-    yt_dlp_args_for_stream_url, DEFAULT_DOWNLOAD_TIMEOUT_MS,
+    build_download_request, build_metadata_request, build_resolve_request,
+    parse_download_path_from_stdout, parse_ytdlp_response,
 };
 use crate::metadata::{parse_flat_playlist, parse_single_video};
 use crate::url_matcher::UrlKind;
@@ -25,8 +24,8 @@ use crate::{
 
 #[host_fn]
 extern "ExtismHost" {
-    /// JSON in → JSON out — see `SubprocessRequest` / `SubprocessResponse`.
-    fn run_subprocess(req: String) -> String;
+    /// Typed JSON in → bounded process result JSON out.
+    fn run_ytdlp(req: String) -> String;
 }
 
 // ── Plugin function exports ───────────────────────────────────────────────────
@@ -53,12 +52,12 @@ pub fn extract_links(url: String) -> FnResult<String> {
 
     let response = match kind {
         UrlKind::Playlist | UrlKind::Channel => {
-            let stdout = call_yt_dlp(yt_dlp_args_for_playlist(&url))?;
+            let stdout = call_yt_dlp(build_metadata_request(&url, true))?;
             let playlist = parse_flat_playlist(&stdout).map_err(error_to_fn_error)?;
             build_playlist_response(playlist)
         }
         UrlKind::Video | UrlKind::Shorts => {
-            let stdout = call_yt_dlp(yt_dlp_args_for_single_video(&url))?;
+            let stdout = call_yt_dlp(build_metadata_request(&url, false))?;
             let video = parse_single_video(&stdout).map_err(error_to_fn_error)?;
             build_single_video_response(video)
         }
@@ -83,7 +82,7 @@ pub fn extract_links(url: String) -> FnResult<String> {
 pub fn get_media_variants(url: String) -> FnResult<String> {
     ensure_single_video(&url).map_err(error_to_fn_error)?;
 
-    let stdout = call_yt_dlp(yt_dlp_args_for_single_video(&url))?;
+    let stdout = call_yt_dlp(build_metadata_request(&url, false))?;
     let video = parse_single_video(&stdout).map_err(error_to_fn_error)?;
     let variants = build_media_variants_response(video);
     Ok(serde_json::to_string(&variants)?)
@@ -98,7 +97,7 @@ pub fn get_media_variants(url: String) -> FnResult<String> {
 pub fn extract_playlist(url: String) -> FnResult<String> {
     ensure_playlist_or_channel(&url).map_err(error_to_fn_error)?;
 
-    let stdout = call_yt_dlp(yt_dlp_args_for_playlist(&url))?;
+    let stdout = call_yt_dlp(build_metadata_request(&url, true))?;
     let playlist = parse_flat_playlist(&stdout).map_err(error_to_fn_error)?;
     let response = build_playlist_response(playlist);
     Ok(serde_json::to_string(&response)?)
@@ -145,7 +144,7 @@ pub fn resolve_stream_url(input: String) -> FnResult<String> {
         return Err(error_to_fn_error(PluginError::AdaptiveStreamOnly));
     }
 
-    let stdout = call_yt_dlp(yt_dlp_args_for_stream_url(
+    let stdout = call_yt_dlp(build_resolve_request(
         &params.url,
         &params.quality,
         &params.format,
@@ -208,51 +207,33 @@ pub fn download_to_file(input: String) -> FnResult<String> {
 
     ensure_single_video(&params.url).map_err(error_to_fn_error)?;
 
-    let args = yt_dlp_args_for_download_to_file(
+    let request = build_download_request(
         &params.url,
         &params.quality,
         &params.format,
         &params.output_dir,
         params.audio_only,
     );
-
-    // Override timeout: full download+merge can take 30+ minutes.
-    let req = crate::extractor::SubprocessRequest {
-        binary: "yt-dlp".into(),
-        args,
-        timeout_ms: DEFAULT_DOWNLOAD_TIMEOUT_MS,
-    };
-    let req_json = serde_json::to_string(&req)
-        .map_err(|e| error_to_fn_error(PluginError::SerdeJson(e)))?;
-
-    let resp_json = unsafe { run_subprocess(req_json)? };
-    let stdout = parse_subprocess_response(&resp_json).map_err(error_to_fn_error)?;
+    let stdout = call_yt_dlp(request)?;
 
     parse_download_path_from_stdout(&stdout).map_err(error_to_fn_error)
 }
 
 // ── Host function wiring ──────────────────────────────────────────────────────
 
-fn call_yt_dlp(args: Vec<String>) -> FnResult<String> {
-    let req_json = build_subprocess_request(args).map_err(error_to_fn_error)?;
-    // SAFETY: `run_subprocess` is resolved by the Vortex plugin host at
-    // load time (see src-tauri/src/adapters/driven/plugin/host_functions.rs:
-    // `make_run_subprocess_function`). Invariants:
-    //   1. The host registers the symbol `run_subprocess` in the
+fn call_yt_dlp(request: Result<String, PluginError>) -> FnResult<String> {
+    let request = request.map_err(error_to_fn_error)?;
+    // SAFETY: `run_ytdlp` is resolved by the Vortex plugin host at load time.
+    // Invariants:
+    //   1. The host registers the symbol `run_ytdlp` in the
     //      `ExtismHost` namespace before any `#[plugin_fn]` export is
-    //      callable — a missing symbol would abort `Plugin::new` in
-    //      extism_loader.rs and prevent the plugin from being loaded.
+    //      callable.
     //   2. The ABI is `(I64) -> I64` — a single u64 Extism memory
-    //      handle in, a single u64 handle out. The `#[host_fn]` macro
-    //      generates the correct marshalling from `String` to/from the
-    //      memory handle.
-    //   3. Host-side capability check rejects calls when the plugin
-    //      manifest does not declare `subprocess:yt-dlp`; the host
-    //      returns an error, which the `?` below propagates safely.
-    //   4. `run_subprocess` has no aliasing or mutability concerns —
-    //      inputs and outputs are owned, serialisable JSON strings.
-    let resp_json = unsafe { run_subprocess(req_json)? };
-    parse_subprocess_response(&resp_json).map_err(error_to_fn_error)
+    //      handle in and one out, generated by `#[host_fn]`.
+    //   3. The host validates the capability and builds every process
+    //      argument from this closed request contract.
+    let response = unsafe { run_ytdlp(request)? };
+    parse_ytdlp_response(&response).map_err(error_to_fn_error)
 }
 
 fn error_to_fn_error(err: PluginError) -> WithReturnCode<extism_pdk::Error> {
